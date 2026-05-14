@@ -1,6 +1,6 @@
 {
   "name": "pi-telegram-tool-status",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Companion extension for pi-telegram (by llblab) — posts a compact live-updating service message listing tools used by the agent during Telegram-originated turns only.",
   "main": "index.ts",
   "scripts": {
