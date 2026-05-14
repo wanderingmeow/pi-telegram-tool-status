@@ -1,14 +1,14 @@
 /**
  * pi-telegram-tool-status
  *
- * Companion extension for pi-telegram that posts a compact service message
- * to Telegram showing which tools the agent uses. One service message is
- * created per user prompt and edited in-place as new tool calls arrive.
- *
- * Install: place this file in ~/.pi/agent/extensions/pi-telegram-tool-status.ts
+ * Companion extension for pi-telegram that shows a compact service message
+ * listing tools used by the agent. One service message is created per
+ * user prompt (only Telegram-originated turns) and edited in-place as
+ * new tool calls arrive. Lazy creation: the message is sent only when the
+ * first tool is actually called.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -36,6 +36,52 @@ async function loadTelegramConfig(): Promise<TelegramConfig> {
 	} catch {
 		return {};
 	}
+}
+
+// --- Telegram bridge lock ---
+
+async function isTelegramConnected(cwd: string): Promise<boolean> {
+	try {
+		const content = await readFile(
+			join(getAgentDir(), "locks.json"),
+			"utf8",
+		);
+		const locks = JSON.parse(content) as Record<
+			string,
+			{ pid: number; cwd: string }
+		>;
+		const entry = locks["@llblab/pi-telegram"];
+		if (!entry) return false;
+		return entry.pid === process.pid && entry.cwd === cwd;
+	} catch {
+		return false;
+	}
+}
+
+// --- Detect Telegram-originated turns ---
+
+function isTelegramTurn(ctx: ExtensionContext): boolean {
+	const entries = ctx.sessionManager.getEntries();
+	for (let i = entries.length - 1; i >= 0; i--) {
+		const entry = entries[i] as any;
+		if (entry.type !== "message") continue;
+		if (entry.message?.role !== "user") continue;
+
+		let text = "";
+		const content = entry.message.content;
+		if (typeof content === "string") {
+			text = content;
+		} else if (Array.isArray(content)) {
+			text = content
+				.filter((c: any) => c.type === "text")
+				.map((c: any) => c.text)
+				.join("\n");
+		}
+
+		// pi-telegram prefixes all bridged prompts with [telegram]
+		return text.startsWith("[telegram]") || text.includes("\n[telegram]");
+	}
+	return false;
 }
 
 // --- Telegram API ---
@@ -71,8 +117,8 @@ async function telegramApiCall(
 
 // --- Formatting ---
 
-const MAX_PATH_LEN = 60;   // tail matters: show the filename
-const MAX_BASH_LEN = 80;   // head matters: show the command start
+const MAX_PATH_LEN = 60; // tail matters: show the filename
+const MAX_BASH_LEN = 80; // head matters: show the command start
 const MAX_OTHER_LEN = 50; // minimal for custom tools
 const MAX_VISIBLE_ITEMS = 15;
 
@@ -122,6 +168,19 @@ function maskBashSecrets(command: string): string {
 	return masked;
 }
 
+function smartTruncateBashPaths(command: string, maxPathLen = 50): string {
+	return command
+		.split(/\s+/)
+		.map((token) => {
+			if (token.length <= maxPathLen) return token;
+			if (!token.includes("/")) return token;
+			if (/^https?:\/\//i.test(token)) return token;
+			const side = Math.floor((maxPathLen - 1) / 2);
+			return token.slice(0, side) + "…" + token.slice(-side);
+		})
+		.join(" ");
+}
+
 function getToolEmoji(toolName: string): string {
 	switch (toolName) {
 		case "read":
@@ -141,17 +200,23 @@ function formatToolDetail(
 	toolName: string,
 	args: Record<string, unknown>,
 ): string {
-	const isPathTool = toolName === "read" || toolName === "write" || toolName === "edit";
+	const isPathTool =
+		toolName === "read" || toolName === "write" || toolName === "edit";
 	const isBash = toolName === "bash";
 
 	if (args.path && typeof args.path === "string") {
 		const path = args.path;
-		return isPathTool ? truncateHead(path, MAX_PATH_LEN) : truncateTail(path, MAX_PATH_LEN);
+		return isPathTool
+			? truncateHead(path, MAX_PATH_LEN)
+			: truncateTail(path, MAX_PATH_LEN);
 	}
 
 	if (args.command && typeof args.command === "string") {
-		const cmd = maskBashSecrets(args.command);
-		return isBash ? truncateTail(cmd, MAX_BASH_LEN) : truncateTail(cmd, MAX_OTHER_LEN);
+		let cmd = maskBashSecrets(args.command);
+		cmd = smartTruncateBashPaths(cmd);
+		return isBash
+			? truncateTail(cmd, MAX_BASH_LEN)
+			: truncateTail(cmd, MAX_OTHER_LEN);
 	}
 
 	if (args.url && typeof args.url === "string") {
@@ -172,9 +237,10 @@ function formatToolDetail(
 	}
 
 	if (args.tool && typeof args.tool === "string") {
-		const server = args.server && typeof args.server === "string"
-			? args.server
-			: undefined;
+		const server =
+			args.server && typeof args.server === "string"
+				? args.server
+				: undefined;
 		const label = server ? `${server}/${args.tool}` : args.tool;
 		return truncateTail(label, MAX_OTHER_LEN);
 	}
@@ -183,7 +249,6 @@ function formatToolDetail(
 		return truncateTail(args.server, MAX_OTHER_LEN);
 	}
 
-	// Memory / recall / session_search — just show the operation name
 	return toolName;
 }
 
@@ -196,50 +261,28 @@ interface ToolCallInfo {
 
 function buildServiceMessageText(calls: ToolCallInfo[]): string {
 	if (calls.length === 0) {
-		return "🛠 Использованы инструменты:\n\n";
+		return "🛠 Tools used:\n\n";
 	}
 
 	const hiddenCount = calls.length - MAX_VISIBLE_ITEMS;
 	const visibleCalls =
 		hiddenCount > 0 ? calls.slice(-MAX_VISIBLE_ITEMS) : calls;
 
-	const lines: string[] = ["🛠 Использованы инструменты:", ""];
+	const lines: string[] = ["🛠 Tools used:", ""];
 
 	if (hiddenCount > 0) {
-		lines.push(`… ещё ${hiddenCount} ${pluralize(hiddenCount, "действие", "действия", "действий")} скрыто`);
+		lines.push(`… ${hiddenCount} more action${hiddenCount !== 1 ? "s" : ""} hidden`);
 	}
 
 	for (const call of visibleCalls) {
 		const detail = call.detail;
 		const separator = detail ? " — " : "";
-		lines.push(`${call.index}. ${call.emoji} ${call.toolName}${separator}${detail}`);
+		lines.push(
+			`${call.index}. ${call.emoji} ${call.toolName}${separator}${detail}`,
+		);
 	}
 
 	return lines.join("\n");
-}
-
-function pluralize(n: number, one: string, few: string, many: string): string {
-	const mod10 = n % 10;
-	const mod100 = n % 100;
-	if (mod100 >= 11 && mod100 <= 19) return many;
-	if (mod10 === 1) return one;
-	if (mod10 >= 2 && mod10 <= 4) return few;
-	return many;
-}
-
-async function isTelegramConnected(cwd: string): Promise<boolean> {
-	try {
-		const content = await readFile(join(getAgentDir(), "locks.json"), "utf8");
-		const locks = JSON.parse(content) as Record<
-			string,
-			{ pid: number; cwd: string }
-		>;
-		const entry = locks["@llblab/pi-telegram"];
-		if (!entry) return false;
-		return entry.pid === process.pid && entry.cwd === cwd;
-	} catch {
-		return false;
-	}
 }
 
 // --- State ---
@@ -248,19 +291,20 @@ let currentServiceMessageId: number | undefined;
 let currentChatId: number | undefined;
 let toolCalls: ToolCallInfo[] = [];
 let nextIndex = 1;
-let agentActive = false;
+let activeTurnIsTelegram = false;
 let initPromise: Promise<void> | undefined;
 
 export default function (pi: ExtensionAPI) {
 	pi.on("agent_start", async (_event, ctx) => {
-		if (!(await isTelegramConnected(ctx.cwd))) return;
+		activeTurnIsTelegram =
+			(await isTelegramConnected(ctx.cwd)) && isTelegramTurn(ctx);
+		if (!activeTurnIsTelegram) return;
 
-		// Reset state for a new user prompt
+		// Reset state for a new Telegram-originated user prompt
 		currentServiceMessageId = undefined;
 		currentChatId = undefined;
 		toolCalls = [];
 		nextIndex = 1;
-		agentActive = true;
 		initPromise = undefined;
 
 		const config = await loadTelegramConfig();
@@ -270,9 +314,8 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", async (event, ctx) => {
-		if (!agentActive) return;
+		if (!activeTurnIsTelegram) return;
 		if (!(await isTelegramConnected(ctx.cwd))) return;
-
 		if (!currentChatId) return;
 
 		// Lazy-create the service message on the very first tool call
@@ -286,7 +329,7 @@ export default function (pi: ExtensionAPI) {
 						"sendMessage",
 						{
 							chat_id: currentChatId,
-							text: "🛠 Использованы инструменты:\n\n",
+							text: "🛠 Tools used:\n\n",
 						},
 					)) as { message_id: number };
 					currentServiceMessageId = result.message_id;
@@ -329,13 +372,12 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async () => {
-		agentActive = false;
+		activeTurnIsTelegram = false;
 		initPromise = undefined;
-		// Leave the final service message in place so the user can review
 	});
 
 	pi.on("session_shutdown", async () => {
-		agentActive = false;
+		activeTurnIsTelegram = false;
 		initPromise = undefined;
 		currentServiceMessageId = undefined;
 		currentChatId = undefined;
