@@ -70,6 +70,10 @@ Copy `index.ts` to `~/.pi/agent/extensions/pi-telegram-tool-status.ts`.
 | **Hidden overflow** | If more than 15 tools — shows last 15 + `… N more actions hidden`. |
 | **Auto-deactivation** | Extension does nothing if Telegram is not connected, the lock belongs to another process, or the turn is local. |
 
+## Known Issues / Notes
+
+- **Settings menu appears after first message** — The `🛠 Tool Status` row in the Telegram Settings submenu (`/start` → ⚙️ Settings) registers lazily on the first agent turn. If you just installed or reloaded the extension, send any message to the bot (or run any console command) and then open Settings — the row will be there.
+
 ## License
 
 MIT
