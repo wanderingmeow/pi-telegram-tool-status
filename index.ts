@@ -18,6 +18,7 @@ import { join, resolve } from "node:path";
 interface TelegramConfig {
 	botToken?: string;
 	allowedUserId?: number;
+	proactivePush?: boolean;
 }
 
 function getAgentDir(): string {
@@ -265,17 +266,17 @@ let toolCalls: ToolCallInfo[] = [];
 let nextIndex = 1;
 let activeTurnIsTelegram = false;
 let initPromise: Promise<void> | undefined;
+let currentCwd: string | undefined;
 
 export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
+		currentCwd = ctx.cwd;
 		activeTurnIsTelegram =
 			(await isTelegramConnected(ctx.cwd)) &&
 			!!(event.prompt?.startsWith("[telegram]") ?? false);
-		if (!activeTurnIsTelegram) return;
 
-		// Reset state for a new Telegram-originated user prompt
+		// Reset tool tracking for every new turn (Telegram or console)
 		currentServiceMessageId = undefined;
-		currentChatId = undefined;
 		toolCalls = [];
 		nextIndex = 1;
 		initPromise = undefined;
@@ -287,6 +288,19 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_execution_start", async (event, ctx) => {
+		// Always collect tool calls (needed for proactive push on console turns)
+		const detail = formatToolDetail(
+			event.toolName,
+			(event.args as Record<string, unknown>) ?? {},
+		);
+		toolCalls.push({
+			index: nextIndex++,
+			toolName: event.toolName,
+			emoji: getToolEmoji(event.toolName),
+			detail,
+		});
+
+		// Only manage live service message for Telegram-originated turns
 		if (!activeTurnIsTelegram) return;
 		if (!(await isTelegramConnected(ctx.cwd))) return;
 		if (!currentChatId) return;
@@ -317,17 +331,6 @@ export default function (pi: ExtensionAPI) {
 
 		if (!currentServiceMessageId) return;
 
-		const detail = formatToolDetail(
-			event.toolName,
-			(event.args as Record<string, unknown>) ?? {},
-		);
-		toolCalls.push({
-			index: nextIndex++,
-			toolName: event.toolName,
-			emoji: getToolEmoji(event.toolName),
-			detail,
-		});
-
 		const config = await loadTelegramConfig();
 		if (!config.botToken) return;
 
@@ -345,8 +348,40 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("agent_end", async () => {
+		// Proactive push: if this was a console turn with tool calls and
+		// proactivePush is enabled, send a one-shot service message.
+		if (!activeTurnIsTelegram && toolCalls.length > 0) {
+			(async () => {
+				try {
+					if (
+						!currentCwd ||
+						!(await isTelegramConnected(currentCwd))
+					) {
+						return;
+					}
+					const config = await loadTelegramConfig();
+					if (
+						!config.proactivePush ||
+						!config.botToken ||
+						!currentChatId
+					) {
+						return;
+					}
+					const text = buildServiceMessageText(toolCalls);
+					await telegramApiCall(config.botToken, "sendMessage", {
+						chat_id: currentChatId,
+						text,
+					});
+				} catch {
+					// ignore
+				}
+			})();
+		}
+
 		activeTurnIsTelegram = false;
 		initPromise = undefined;
+		toolCalls = [];
+		nextIndex = 1;
 	});
 
 	pi.on("session_shutdown", async () => {
