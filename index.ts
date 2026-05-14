@@ -459,31 +459,6 @@ export default function (pi: ExtensionAPI) {
 		const unregister = registry.register({
 			id: "pi-telegram-tool-status",
 			label: "🛠 Tool Status",
-			order: 20,
-			render: async (ctx: any) => {
-				sectionSettings = await loadExtensionSettings();
-				return {
-					text: `<b>🛠 Tool Status</b>\n\nLive service message listing tools used by the agent.`,
-					parseMode: "html",
-					replyMarkup: {
-						inline_keyboard: [
-							[
-								{
-									text: "📄 View config",
-									callback_data: ctx.callbackData("view-config"),
-								},
-							],
-						],
-					},
-				};
-			},
-			handleCallback: async (ctx: any) => {
-				if (ctx.action === "view-config") {
-					await ctx.answerCallback();
-					return "handled";
-				}
-				return "pass";
-			},
 			settings: {
 				label: "🛠 Tool Status",
 				order: 10,
