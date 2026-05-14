@@ -452,50 +452,81 @@ export default function (pi: ExtensionAPI) {
 
 	// --- Telegram Settings Section ---
 	// Gracefully skip if pi-telegram is not installed / not loaded yet
-	try {
-		const { registerTelegramSection } = require("@llblab/pi-telegram/lib/extension-sections.ts");
-		if (typeof registerTelegramSection === "function") {
-			let sectionSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
+	const registry = (globalThis as any).__piTelegramSectionRegistry__;
+	if (typeof registry?.register === "function") {
+		let sectionSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
 
-			const unregister = registerTelegramSection({
-				id: "pi-telegram-tool-status",
+		const unregister = registry.register({
+			id: "pi-telegram-tool-status",
+			label: "🛠 Tool Status",
+			order: 20,
+			render: async (ctx: any) => {
+				sectionSettings = await loadExtensionSettings();
+				return {
+					text: `<b>🛠 Tool Status</b>\n\nLive service message listing tools used by the agent.`,
+					parseMode: "html",
+					replyMarkup: {
+						inline_keyboard: [
+							[
+								{
+									text: "📄 View config",
+									callback_data: ctx.callbackData("view-config"),
+								},
+							],
+						],
+					},
+				};
+			},
+			handleCallback: async (ctx: any) => {
+				if (ctx.action === "view-config") {
+					await ctx.answerCallback();
+					return "handled";
+				}
+				return "pass";
+			},
+			settings: {
 				label: "🛠 Tool Status",
-				order: 20,
-				render: async (ctx) => {
+				order: 10,
+				getLabel: () => {
+					const enabled = sectionSettings.enabled;
+					return `${enabled ? "🟢" : "⚫️"} Tool Status`;
+				},
+				open: async (ctx: any) => {
 					sectionSettings = await loadExtensionSettings();
+					const s = sectionSettings;
 					return {
-						text: `<b>🛠 Tool Status</b>\n\nLive service message listing tools used by the agent.`,
+						text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
 						parseMode: "html",
 						replyMarkup: {
 							inline_keyboard: [
 								[
 									{
-										text: "📄 View config",
-										callback_data: ctx.callbackData("view-config"),
+										text: `${s.enabled ? "🟢 ON" : "⚫️ OFF"} Extension enabled`,
+										callback_data: ctx.callbackData("toggle-enabled"),
+									},
+								],
+								[
+									{
+										text: `${s.proactivePushTools ? "🟢 ON" : "⚫️ OFF"} Proactive push tools`,
+										callback_data: ctx.callbackData("toggle-proactive"),
 									},
 								],
 							],
 						},
 					};
 				},
-				handleCallback: async (ctx) => {
-					if (ctx.action === "view-config") {
-						await ctx.answerCallback();
-						return "handled";
-					}
-					return "pass";
-				},
-				settings: {
-					label: "🛠 Tool Status",
-					order: 10,
-					getLabel: () => {
-						const enabled = sectionSettings.enabled;
-						return `${enabled ? "🟢" : "⚫️"} Tool Status`;
-					},
-					open: async (ctx) => {
-						sectionSettings = await loadExtensionSettings();
+				handleCallback: async (ctx: any) => {
+					if (ctx.action === "toggle-enabled") {
+						sectionSettings.enabled = !sectionSettings.enabled;
+						await saveExtensionSettings(sectionSettings);
+						await ctx.answerCallback(
+							sectionSettings.enabled
+								? "Extension enabled"
+								: "Extension disabled",
+						);
+						// Re-render settings view
 						const s = sectionSettings;
-						return {
+						await ctx.edit({
 							text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
 							parseMode: "html",
 							replyMarkup: {
@@ -514,83 +545,48 @@ export default function (pi: ExtensionAPI) {
 									],
 								],
 							},
-						};
-					},
-					handleCallback: async (ctx) => {
-						if (ctx.action === "toggle-enabled") {
-							sectionSettings.enabled = !sectionSettings.enabled;
-							await saveExtensionSettings(sectionSettings);
-							await ctx.answerCallback(
-								sectionSettings.enabled
-									? "Extension enabled"
-									: "Extension disabled",
-							);
-							// Re-render settings view
-							const s = sectionSettings;
-							await ctx.edit({
-								text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
-								parseMode: "html",
-								replyMarkup: {
-									inline_keyboard: [
-										[
-											{
-												text: `${s.enabled ? "🟢 ON" : "⚫️ OFF"} Extension enabled`,
-												callback_data: ctx.callbackData("toggle-enabled"),
-											},
-										],
-										[
-											{
-												text: `${s.proactivePushTools ? "🟢 ON" : "⚫️ OFF"} Proactive push tools`,
-												callback_data: ctx.callbackData("toggle-proactive"),
-											},
-										],
+						});
+						return "handled";
+					}
+					if (ctx.action === "toggle-proactive") {
+						sectionSettings.proactivePushTools = !sectionSettings.proactivePushTools;
+						await saveExtensionSettings(sectionSettings);
+						await ctx.answerCallback(
+							sectionSettings.proactivePushTools
+								? "Proactive push tools enabled"
+								: "Proactive push tools disabled",
+						);
+						// Re-render settings view
+						const s = sectionSettings;
+						await ctx.edit({
+							text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
+							parseMode: "html",
+							replyMarkup: {
+								inline_keyboard: [
+									[
+										{
+											text: `${s.enabled ? "🟢 ON" : "⚫️ OFF"} Extension enabled`,
+											callback_data: ctx.callbackData("toggle-enabled"),
+										},
 									],
-								},
-							});
-							return "handled";
-						}
-						if (ctx.action === "toggle-proactive") {
-							sectionSettings.proactivePushTools = !sectionSettings.proactivePushTools;
-							await saveExtensionSettings(sectionSettings);
-							await ctx.answerCallback(
-								sectionSettings.proactivePushTools
-									? "Proactive push tools enabled"
-									: "Proactive push tools disabled",
-							);
-							// Re-render settings view
-							const s = sectionSettings;
-							await ctx.edit({
-								text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
-								parseMode: "html",
-								replyMarkup: {
-									inline_keyboard: [
-										[
-											{
-												text: `${s.enabled ? "🟢 ON" : "⚫️ OFF"} Extension enabled`,
-												callback_data: ctx.callbackData("toggle-enabled"),
-											},
-										],
-										[
-											{
-												text: `${s.proactivePushTools ? "🟢 ON" : "⚫️ OFF"} Proactive push tools`,
-												callback_data: ctx.callbackData("toggle-proactive"),
-											},
-										],
+									[
+										{
+											text: `${s.proactivePushTools ? "🟢 ON" : "⚫️ OFF"} Proactive push tools`,
+											callback_data: ctx.callbackData("toggle-proactive"),
+										},
 									],
-								},
-							});
-							return "handled";
-						}
-						return "pass";
-					},
+								],
+							},
+						});
+						return "handled";
+					}
+					return "pass";
 				},
-			});
+			},
+		});
 
-			pi.on("session_shutdown", () => {
-				unregister();
-			});
-		}
-	} catch {
-		// pi-telegram not available — skip Telegram sections gracefully
+		pi.on("session_shutdown", () => {
+			unregister();
+		});
 	}
 }
