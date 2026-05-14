@@ -451,22 +451,25 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// --- Telegram Settings Section ---
-	// Use globalThis bridge because pi-telegram publishes raw .ts files
-	// without package.json exports. The globalThis registry is set by
-	// pi-telegram at startup and is the documented zero-coupling approach.
-	const registry = (globalThis as any).__piTelegramSectionRegistry__;
-	if (typeof registry?.register === "function") {
-		let sectionSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
+	// Lazy registration: pi-telegram may load after this extension on /reload.
+	// We attempt registration on every before_agent_start until it succeeds.
+	let sectionUnregister: (() => void) | undefined;
+	let sectionSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
 
-		const unregister = registry.register({
+	async function tryRegisterTelegramSection(): Promise<void> {
+		const registry = (globalThis as any).__piTelegramSectionRegistry__;
+		if (typeof registry?.register !== "function") return;
+		if (sectionUnregister) return; // already registered
+
+		sectionSettings = await loadExtensionSettings();
+		sectionUnregister = registry.register({
 			id: "pi-telegram-tool-status",
 			label: "🛠 Tool Status",
 			settings: {
 				label: "🛠 Tool Status",
 				order: 10,
 				getLabel: () => {
-					const enabled = sectionSettings.enabled;
-					return `${enabled ? "🟢" : "⚫️"} Tool Status`;
+					return `${sectionSettings.enabled ? "🟢" : "⚫️"} Tool Status`;
 				},
 				open: async (ctx: any) => {
 					sectionSettings = await loadExtensionSettings();
@@ -501,7 +504,6 @@ export default function (pi: ExtensionAPI) {
 								? "Extension enabled"
 								: "Extension disabled",
 						);
-						// Re-render settings view
 						const s = sectionSettings;
 						await ctx.edit({
 							text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
@@ -533,7 +535,6 @@ export default function (pi: ExtensionAPI) {
 								? "Proactive push tools enabled"
 								: "Proactive push tools disabled",
 						);
-						// Re-render settings view
 						const s = sectionSettings;
 						await ctx.edit({
 							text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
@@ -561,9 +562,17 @@ export default function (pi: ExtensionAPI) {
 				},
 			},
 		});
-
-		pi.on("session_shutdown", () => {
-			unregister();
-		});
 	}
+
+	pi.on("before_agent_start", async (_event, _ctx) => {
+		await tryRegisterTelegramSection();
+	});
+
+	pi.on("session_shutdown", () => {
+		if (sectionUnregister) {
+			sectionUnregister();
+			sectionUnregister = undefined;
+		}
+	});
+}
 }
