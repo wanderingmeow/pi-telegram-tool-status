@@ -91,9 +91,7 @@ async function telegramApiCall(
 
 // --- Formatting ---
 
-const MAX_PATH_LEN = 60; // tail matters: show the filename
-const MAX_BASH_LEN = 80; // head matters: show the command start
-const MAX_OTHER_LEN = 50; // minimal for custom tools
+const MAX_DETAIL_LEN = 50; // universal compact limit for all tools
 const MAX_VISIBLE_ITEMS = 15;
 
 function truncateTail(text: string, max: number): string {
@@ -181,33 +179,33 @@ function formatToolDetail(
 	if (args.path && typeof args.path === "string") {
 		const path = args.path;
 		return isPathTool
-			? truncateHead(path, MAX_PATH_LEN)
-			: truncateTail(path, MAX_PATH_LEN);
+			? truncateHead(path, MAX_DETAIL_LEN)
+			: truncateTail(path, MAX_DETAIL_LEN);
 	}
 
 	if (args.command && typeof args.command === "string") {
 		let cmd = maskBashSecrets(args.command);
 		cmd = smartTruncateBashPaths(cmd);
 		return isBash
-			? truncateTail(cmd, MAX_BASH_LEN)
-			: truncateTail(cmd, MAX_OTHER_LEN);
+			? truncateTail(cmd, MAX_DETAIL_LEN)
+			: truncateTail(cmd, MAX_DETAIL_LEN);
 	}
 
 	if (args.url && typeof args.url === "string") {
 		try {
 			const u = new URL(args.url);
-			return truncateTail(u.hostname + u.pathname, MAX_OTHER_LEN);
+			return truncateTail(u.hostname + u.pathname, MAX_DETAIL_LEN);
 		} catch {
-			return truncateTail(args.url, MAX_OTHER_LEN);
+			return truncateTail(args.url, MAX_DETAIL_LEN);
 		}
 	}
 
 	if (args.query && typeof args.query === "string") {
-		return truncateTail(args.query, MAX_OTHER_LEN);
+		return truncateTail(args.query, MAX_DETAIL_LEN);
 	}
 
 	if (args.file && typeof args.file === "string") {
-		return truncateTail(args.file, MAX_OTHER_LEN);
+		return truncateTail(args.file, MAX_DETAIL_LEN);
 	}
 
 	if (args.tool && typeof args.tool === "string") {
@@ -216,11 +214,11 @@ function formatToolDetail(
 				? args.server
 				: undefined;
 		const label = server ? `${server}/${args.tool}` : args.tool;
-		return truncateTail(label, MAX_OTHER_LEN);
+		return truncateTail(label, MAX_DETAIL_LEN);
 	}
 
 	if (args.server && typeof args.server === "string") {
-		return truncateTail(args.server, MAX_OTHER_LEN);
+		return truncateTail(args.server, MAX_DETAIL_LEN);
 	}
 
 	return toolName;
