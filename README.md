@@ -1,6 +1,10 @@
 # pi-telegram-tool-status
 
-Companion extension for [`pi-telegram`](https://github.com/llblab/pi-telegram) that posts a compact service message to Telegram listing tools used by the agent.
+[![Tested with pi-telegram](https://img.shields.io/badge/Companion-pi--telegram-blue)](https://github.com/llblab/pi-telegram)
+
+Companion extension for [`pi-telegram`](https://github.com/llblab/pi-telegram) by [@llblab](https://github.com/llblab). Displays a compact, live-updating service message in Telegram listing every tool executed by the agent.
+
+> ⚠️ **Requires `pi-telegram`** — this extension does nothing on its own. It was developed and tested specifically against `llblab/pi-telegram`. Forks may work but are not guaranteed.
 
 ## How it works
 
@@ -26,7 +30,9 @@ Companion extension for [`pi-telegram`](https://github.com/llblab/pi-telegram) t
 
 ## Install
 
-### From npm (when published)
+> Make sure `pi-telegram` is installed and connected first.
+
+### From npm
 
 ```bash
 pi install npm:pi-telegram-tool-status
@@ -44,7 +50,8 @@ Copy `index.ts` to `~/.pi/agent/extensions/pi-telegram-tool-status.ts`.
 
 ## Requirements
 
-- [`pi-telegram`](https://github.com/llblab/pi-telegram) configured and connected (`/telegram-setup` + `/telegram-connect`).
+- **Required:** [`pi-telegram`](https://github.com/llblab/pi-telegram) must be installed, configured (`/telegram-setup`), and connected (`/telegram-connect`).
+  - This extension was developed and tested with `llblab/pi-telegram`. Compatibility with forks is not guaranteed.
 - The extension activates **only** when:
   1. The current pi session owns the Telegram lock (`locks.json`).
   2. The current turn originated from Telegram (prompt prefixed with `[telegram]`).
