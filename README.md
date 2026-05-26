@@ -50,7 +50,7 @@ Copy `index.ts` to `~/.pi/agent/extensions/pi-telegram-tool-status.ts`.
 
 ## Requirements
 
-- **Required:** [`pi-telegram`](https://github.com/llblab/pi-telegram) `^0.12.0` must be installed, configured (`/telegram-setup`), and connected (`/telegram-connect`).
+- **Required:** [`pi-telegram`](https://github.com/llblab/pi-telegram) `>=0.12.0` must be installed, configured (`/telegram-setup`), and connected (`/telegram-connect`).
   - This extension was developed and tested with `llblab/pi-telegram`. Compatibility with forks is not guaranteed.
 - The extension activates **only** when:
   1. The current pi session owns the Telegram lock (`locks.json`).
