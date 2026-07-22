@@ -12,6 +12,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { registerTelegramActivityHandler } from "@llblab/pi-telegram/activity";
+import { registerTelegramSection } from "@llblab/pi-telegram/sections";
+import type {
+  TelegramActivityContext,
+  TelegramActivityEvent,
+} from "@llblab/pi-telegram/activity";
 
 // --- Extension Settings ---
 
@@ -51,81 +57,12 @@ async function saveExtensionSettings(settings: ExtensionSettings): Promise<void>
 	}
 }
 
-// --- Config ---
-
-interface TelegramConfig {
-	botToken?: string;
-	allowedUserId?: number;
-	proactivePush?: boolean;
-}
+// --- Config (minimal: agent dir only) ---
 
 function getAgentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR
 		? resolve(process.env.PI_CODING_AGENT_DIR)
 		: join(homedir(), ".pi", "agent");
-}
-
-async function loadTelegramConfig(): Promise<TelegramConfig> {
-	try {
-		const content = await readFile(
-			join(getAgentDir(), "telegram.json"),
-			"utf8",
-		);
-		return JSON.parse(content) as TelegramConfig;
-	} catch {
-		return {};
-	}
-}
-
-// --- Telegram bridge lock ---
-
-async function isTelegramConnected(cwd: string): Promise<boolean> {
-	try {
-		const content = await readFile(
-			join(getAgentDir(), "locks.json"),
-			"utf8",
-		);
-		const locks = JSON.parse(content) as Record<
-			string,
-			{ pid: number; cwd: string }
-		>;
-		const entry = locks["@llblab/pi-telegram"];
-		if (!entry) return false;
-		return entry.pid === process.pid && entry.cwd === cwd;
-	} catch {
-		return false;
-	}
-}
-
-// --- Telegram API ---
-
-async function telegramApiCall(
-	token: string,
-	method: string,
-	payload: unknown,
-): Promise<unknown> {
-	const response = await fetch(
-		`https://api.telegram.org/bot${token}/${method}`,
-		{
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify(payload),
-		},
-	);
-	if (!response.ok) {
-		throw new Error(`Telegram API ${method} failed: ${response.status}`);
-	}
-	const data = (await response.json()) as {
-		ok: boolean;
-		result?: unknown;
-		description?: string;
-	};
-	if (!data.ok) {
-		throw new Error(
-			`Telegram API ${method} error: ${data.description ?? "unknown"}`,
-		);
-	}
-	return data.result;
 }
 
 // --- Formatting ---
@@ -296,183 +233,148 @@ function buildServiceMessageText(calls: ToolCallInfo[]): string {
 	return lines.join("\n");
 }
 
-// --- State ---
+// --- State (managed by Activity Handler) ---
 
-let currentServiceMessageId: number | undefined;
-let currentChatId: number | undefined;
+// Module-level state for tracking tool calls across activity events.
+// Reset on each new agent-start (new activity).
 let toolCalls: ToolCallInfo[] = [];
 let nextIndex = 1;
-let activeTurnIsTelegram = false;
-let initPromise: Promise<void> | undefined;
-let currentCwd: string | undefined;
+// The delivery handle for the live service message (Telegram turns only).
+// Stored so we can edit the same message across tool events.
+let serviceMessageHandle: { handle: unknown; source: string } | undefined;
+// Whether the current activity is Telegram-originated.
+let isTelegramActivity = false;
+
+function resetState(): void {
+	toolCalls = [];
+	nextIndex = 1;
+	serviceMessageHandle = undefined;
+	isTelegramActivity = false;
+}
 
 export default function (pi: ExtensionAPI) {
-	pi.on("before_agent_start", async (event, ctx) => {
-		const settings = await loadExtensionSettings();
-		if (!settings.enabled) return;
+	const disposers: Array<() => void> = [];
+	let sectionSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
+	let registered = false;
 
-		currentCwd = ctx.cwd;
-		activeTurnIsTelegram =
-			(await isTelegramConnected(ctx.cwd)) &&
-			!!(event.prompt?.startsWith("[telegram]") ?? false);
+	// ── Activity Handler (safe to register immediately) ──
 
-		// Reset tool tracking for every new turn (Telegram or console)
-		currentServiceMessageId = undefined;
-		toolCalls = [];
-		nextIndex = 1;
-		initPromise = undefined;
+	const unregisterActivity = registerTelegramActivityHandler({
+		id: "pi-telegram-tool-status/activity",
+		order: 0,
+		handle: async (
+			event: TelegramActivityEvent,
+			ctx: TelegramActivityContext,
+		) => {
+			const settings = await loadExtensionSettings();
+			if (!settings.enabled) return;
 
-		const config = await loadTelegramConfig();
-		if (config.botToken && config.allowedUserId) {
-			currentChatId = config.allowedUserId;
-		}
-	});
-
-	pi.on("tool_execution_start", async (event, ctx) => {
-		const settings = await loadExtensionSettings();
-		if (!settings.enabled) return;
-
-		// Always collect tool calls (needed for proactive push on console turns)
-		const detail = formatToolDetail(
-			event.toolName,
-			(event.args as Record<string, unknown>) ?? {},
-		);
-		toolCalls.push({
-			index: nextIndex++,
-			toolName: event.toolName,
-			emoji: getToolEmoji(event.toolName),
-			detail,
-		});
-
-		// Only manage live service message for Telegram-originated turns
-		if (!activeTurnIsTelegram) return;
-		if (!(await isTelegramConnected(ctx.cwd))) return;
-		if (!currentChatId) return;
-
-		// Lazy-create the service message on the very first tool call
-		if (!currentServiceMessageId) {
-			if (!initPromise) {
-				initPromise = (async () => {
-					const config = await loadTelegramConfig();
-					if (!config.botToken) return;
-					const result = (await telegramApiCall(
-						config.botToken,
-						"sendMessage",
-						{
-							chat_id: currentChatId,
-							text: "🛠 Tools used:\n\n",
-						},
-					)) as { message_id: number };
-					currentServiceMessageId = result.message_id;
-				})();
-			}
-			try {
-				await initPromise;
-			} catch {
+			if (event.type === "agent-start") {
+				resetState();
+				isTelegramActivity = event.source === "telegram";
 				return;
 			}
-		}
 
-		if (!currentServiceMessageId) return;
+			if (event.type === "tool-start") {
+				const detail = formatToolDetail(
+					event.toolName,
+					(event.args as Record<string, unknown>) ?? {},
+				);
+				toolCalls.push({
+					index: nextIndex++,
+					toolName: event.toolName,
+					emoji: getToolEmoji(event.toolName),
+					detail,
+				});
 
-		const config = await loadTelegramConfig();
-		if (!config.botToken) return;
+				if (!isTelegramActivity) return;
 
-		const text = buildServiceMessageText(toolCalls);
+				const text = buildServiceMessageText(toolCalls);
 
-		try {
-			await telegramApiCall(config.botToken, "editMessageText", {
-				chat_id: currentChatId,
-				message_id: currentServiceMessageId,
-				text,
-			});
-		} catch {
-			// Ignore edit failures (message may have been deleted, etc.)
-		}
-	});
-
-	pi.on("agent_end", async () => {
-		const settings = await loadExtensionSettings();
-		if (!settings.enabled) {
-			activeTurnIsTelegram = false;
-			initPromise = undefined;
-			toolCalls = [];
-			nextIndex = 1;
-			return;
-		}
-
-		// Proactive push: if this was a console turn with tool calls and
-		// proactivePush is enabled, send a one-shot service message.
-		if (!activeTurnIsTelegram && toolCalls.length > 0) {
-			const capturedCalls = toolCalls.slice(); // snapshot before clear
-			const capturedCwd = currentCwd;
-			(async () => {
-				try {
-					if (
-						!capturedCwd ||
-						!(await isTelegramConnected(capturedCwd))
-					) {
-						return;
+				if (!serviceMessageHandle) {
+					const result = await ctx.send(
+						{ text, parseMode: "plain" },
+						{ scope: ctx.defaultScope },
+					);
+					if (result.ok) {
+						serviceMessageHandle = {
+							handle: result.value,
+							source: "telegram",
+						};
 					}
-					const config = await loadTelegramConfig();
-					if (
-						!config.proactivePush ||
-						!config.botToken ||
-						!currentChatId
-					) {
-						return;
-					}
-					// Also respect extension-level proactivePushTools setting
-					if (!settings.proactivePushTools) return;
-					const text = buildServiceMessageText(capturedCalls);
-					await telegramApiCall(config.botToken, "sendMessage", {
-						chat_id: currentChatId,
+				} else {
+					const handle = serviceMessageHandle.handle as any;
+					const editResult = await ctx.edit(handle, {
 						text,
+						parseMode: "plain",
 					});
-				} catch {
-					// ignore
+					if (editResult.ok) {
+						serviceMessageHandle = {
+							handle: editResult.value,
+							source: "telegram",
+						};
+					}
 				}
-			})();
-		}
+				return;
+			}
 
-		activeTurnIsTelegram = false;
-		initPromise = undefined;
-		toolCalls = [];
-		nextIndex = 1;
+			if (event.type === "tool-end") {
+				return;
+			}
+
+			if (event.type === "agent-settled") {
+				if (!isTelegramActivity && toolCalls.length > 0) {
+					const settingsNow = await loadExtensionSettings();
+					if (settingsNow.proactivePushTools) {
+						const text = buildServiceMessageText(toolCalls);
+						const result = await ctx.send(
+							{ text, parseMode: "plain" },
+							{ scope: ctx.defaultScope },
+						);
+						if (!result.ok) { /* best-effort */ }
+					}
+				}
+				resetState();
+				return;
+			}
+		},
 	});
+	disposers.push(unregisterActivity);
 
-	pi.on("session_shutdown", async () => {
-		activeTurnIsTelegram = false;
-		initPromise = undefined;
-		currentServiceMessageId = undefined;
-		currentChatId = undefined;
-		toolCalls = [];
-		nextIndex = 1;
-	});
+	// ── Settings Section (deferred to session_start so pi-telegram is ready) ──
 
-	// --- Telegram Settings Section ---
-	// Lazy registration: pi-telegram may load after this extension on /reload.
-	// We attempt registration on every before_agent_start until it succeeds.
-	let sectionUnregister: (() => void) | undefined;
-	let sectionSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
+	pi.on("session_start", () => {
+		if (registered) return;
+		registered = true;
 
-	async function tryRegisterTelegramSection(): Promise<void> {
-		const registry = (globalThis as any).__piTelegramSectionRegistry__;
-		if (typeof registry?.register !== "function") return;
-		if (sectionUnregister) return; // already registered
-
-		sectionSettings = await loadExtensionSettings();
-		sectionUnregister = registry.register({
+		const unregisterSection = registerTelegramSection({
 			id: "pi-telegram-tool-status",
 			label: "🛠 Tool Status",
-			render: async (_ctx: any) => {
-				const s = sectionSettings;
+			order: 10,
+			render: async (ctx) => {
+				const s = await loadExtensionSettings();
+				sectionSettings = s;
 				return {
-					text: `<b>🛠 Tool Status</b>\n\nStatus: ${s.enabled ? "🟢 ON" : "⚫️ OFF"}\nProactive push: ${s.proactivePushTools ? "🟢 ON" : "⚫️ OFF"}\n\nShows a live service message listing tools used by the agent during each Telegram prompt.`,
+					text: `<b>🛠 Tool Status</b>\n\nShows a live service message listing tools used by the agent during each Telegram prompt.\n\nStatus: <b>${s.enabled ? "🟢 ON" : "⚫️ OFF"}</b>\nProactive push: <b>${s.proactivePushTools ? "🟢 ON" : "⚫️ OFF"}</b>`,
 					parseMode: "html",
+					replyMarkup: {
+						inline_keyboard: [
+							[
+								{
+									text: "⚙️ Settings",
+									callback_data: ctx.callbackData("open-settings"),
+								},
+							],
+						],
+					},
 				};
 			},
-			handleCallback: async (_ctx: any) => {
+			handleCallback: async (ctx) => {
+				if (ctx.action === "open-settings") {
+					const s = await loadExtensionSettings();
+					sectionSettings = s;
+					return "handled";
+				}
 				return "pass";
 			},
 			settings: {
@@ -481,9 +383,9 @@ export default function (pi: ExtensionAPI) {
 				getLabel: () => {
 					return `${sectionSettings.enabled ? "🟢" : "⚫️"} Tool Status`;
 				},
-				open: async (ctx: any) => {
-					sectionSettings = await loadExtensionSettings();
-					const s = sectionSettings;
+				open: async (ctx) => {
+					const s = await loadExtensionSettings();
+					sectionSettings = s;
 					return {
 						text: `<b>🛠 Tool Status Settings</b>\n\nConfigure when the extension sends tool-usage messages.`,
 						parseMode: "html",
@@ -505,14 +407,12 @@ export default function (pi: ExtensionAPI) {
 						},
 					};
 				},
-				handleCallback: async (ctx: any) => {
+				handleCallback: async (ctx) => {
 					if (ctx.action === "toggle-enabled") {
 						sectionSettings.enabled = !sectionSettings.enabled;
 						await saveExtensionSettings(sectionSettings);
 						await ctx.answerCallback(
-							sectionSettings.enabled
-								? "Extension enabled"
-								: "Extension disabled",
+							sectionSettings.enabled ? "Extension enabled" : "Extension disabled",
 						);
 						const s = sectionSettings;
 						await ctx.edit({
@@ -541,9 +441,7 @@ export default function (pi: ExtensionAPI) {
 						sectionSettings.proactivePushTools = !sectionSettings.proactivePushTools;
 						await saveExtensionSettings(sectionSettings);
 						await ctx.answerCallback(
-							sectionSettings.proactivePushTools
-								? "Proactive push tools enabled"
-								: "Proactive push tools disabled",
+							sectionSettings.proactivePushTools ? "Proactive push tools enabled" : "Proactive push tools disabled",
 						);
 						const s = sectionSettings;
 						await ctx.edit({
@@ -572,16 +470,14 @@ export default function (pi: ExtensionAPI) {
 				},
 			},
 		});
-	}
-
-	pi.on("before_agent_start", async (_event, _ctx) => {
-		await tryRegisterTelegramSection();
+		disposers.push(unregisterSection);
 	});
 
+	// ── Cleanup ──
+
 	pi.on("session_shutdown", () => {
-		if (sectionUnregister) {
-			sectionUnregister();
-			sectionUnregister = undefined;
-		}
+		resetState();
+		for (const dispose of disposers) dispose();
+		registered = false;
 	});
 }
