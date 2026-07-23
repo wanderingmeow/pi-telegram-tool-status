@@ -362,7 +362,7 @@ export default function (pi: ExtensionAPI) {
 							[
 								{
 									text: "⚙️ Settings",
-									callback_data: ctx.callbackData("open-settings"),
+									callback_data: ctx.callbackData("settings", "open"),
 								},
 							],
 						],
@@ -370,11 +370,6 @@ export default function (pi: ExtensionAPI) {
 				};
 			},
 			handleCallback: async (ctx) => {
-				if (ctx.action === "open-settings") {
-					const s = await loadExtensionSettings();
-					sectionSettings = s;
-					return "handled";
-				}
 				return "pass";
 			},
 			settings: {
